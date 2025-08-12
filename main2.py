@@ -42,18 +42,55 @@ for col in num_cols:
 dt = 1 / freq
 x = [i * dt for i in range(len(df))]  # Axe des temps synthétique
 
+def euler_to_rotation_matrix(roll, pitch, yaw):
+    """Convertit angles roll, pitch, yaw (rad) en matrice de rotation 3x3."""
+    Rx = np.array([
+        [1, 0, 0],
+        [0, np.cos(roll), -np.sin(roll)],
+        [0, np.sin(roll), np.cos(roll)]
+    ])
+    Ry = np.array([
+        [np.cos(pitch), 0, np.sin(pitch)],
+        [0, 1, 0],
+        [-np.sin(pitch), 0, np.cos(pitch)]
+    ])
+    Rz = np.array([
+        [np.cos(yaw), -np.sin(yaw), 0],
+        [np.sin(yaw), np.cos(yaw), 0],
+        [0, 0, 1]
+    ])
+    # Ordre de rotation : Rz * Ry * Rx (yaw → pitch → roll)
+    return Rz @ Ry @ Rx
+
+# Accélérations brutes en m/s²
 acc_x = df["AccX(g)"].to_numpy() * 9.81
 acc_y = df["AccY(g)"].to_numpy() * 9.81
-acc_z = (df["AccZ(g)"] - 1.0).to_numpy() * 9.81  # -1g pour retirer gravité
+acc_z = df["AccZ(g)"].to_numpy() * 9.81
+acc_raw = np.vstack((acc_x, acc_y, acc_z)).T  # shape (N,3)
+
+# Angles en radians
+roll  = np.deg2rad(df["AngleX(°)"].to_numpy())
+pitch = np.deg2rad(df["AngleY(°)"].to_numpy())
+yaw   = np.deg2rad(df["AngleZ(°)"].to_numpy())
+
+g_world = np.array([0, 0, 9.81])
+acc_lin = np.zeros_like(acc_raw)
+
+for i in range(len(df)):
+    R = euler_to_rotation_matrix(roll[i], pitch[i], yaw[i])
+    g_sensor = R @ g_world
+    acc_lin[i] = acc_raw[i] - g_sensor
+
+print(acc_lin)
 
 vit_x = [0.0]
 vit_y = [0.0]
 vit_z = [0.0]
 
 for i in range(1, len(df)):
-    vit_x.append(vit_x[-1] + (acc_x[i] + acc_x[i-1]) * dt * 0.5)
-    vit_y.append(vit_y[-1] + (acc_y[i] + acc_y[i-1]) * dt * 0.5)
-    vit_z.append(vit_z[-1] + (acc_z[i] + acc_z[i-1]) * dt * 0.5)
+    vit_x.append(vit_x[-1] + (acc_lin[i][0] + acc_lin[i-1][0]) * dt * 0.5)
+    vit_y.append(vit_y[-1] + (acc_lin[i][1] + acc_lin[i-1][1]) * dt * 0.5)
+    vit_z.append(vit_z[-1] + (acc_lin[i][2] + acc_lin[i-1][2]) * dt * 0.5)
 
 vit_total = np.sqrt(np.square(vit_x) + np.square(vit_y) + np.square(vit_z))
 
@@ -76,11 +113,19 @@ plt.grid(True)
 rax = plt.axes([0.85, 0.4, 0.1, 0.15])  # [left, bottom, width, height]
 check = CheckButtons(rax, [line.get_label() for line in lines], [True]*len(lines))
 
-annot = ax.annotate("", xy=(0, 0), xytext=(10, 10),
+annot1 = ax.annotate("", xy=(0, 0), xytext=(10, 10),
                     textcoords="offset points",
                     bbox=dict(boxstyle="round", fc="w"),
                     arrowprops=dict(arrowstyle="->"))
-annot.set_visible(False)
+annot1.set_visible(False)
+
+annot2 = ax.annotate("", xy=(0, 0), xytext=(10, 10),
+                    textcoords="offset points",
+                    bbox=dict(boxstyle="round", fc="w"),
+                    arrowprops=dict(arrowstyle="->"))
+annot2.set_visible(False)
+
+last_click = {'x': None, 'y': None}
 
 def update_annot(line, ind):
     """Met à jour l'annotation avec les coordonnées du point cliqué."""
@@ -88,17 +133,28 @@ def update_annot(line, ind):
     xdata, ydata = line.get_data()
     x_coord = xdata[point_index]
     y_coord = ydata[point_index]
-    annot.xy = (x_coord, y_coord)
-    text = f"{line.get_label()}\nx={x_coord:.2f}, y={y_coord:.2f}"
-    annot.set_text(text)
-    annot.get_bbox_patch().set_alpha(0.8)
+    annot1.xy = (x_coord, y_coord)
+    text = f"{line.get_label()}\nx={x_coord:.3f}, y={y_coord:.3f}"
+    annot1.set_text(text)
+    annot1.get_bbox_patch().set_alpha(0.8)
 
 def on_pick(event):
     """Détecte quelle courbe a été cliquée et affiche l'annotation."""
+    global last_click
+    x, y = event.mouseevent.x, event.mouseevent.y
+    if (x, y) == (last_click['x'], last_click['y']):
+        return  # ignorer le doublon
+    last_click = {'x': x, 'y': y}
+
     if isinstance(event.artist, plt.Line2D):
         line = event.artist
+        save_annot_xy = annot1.xy
+        save_annot_txt = annot1.get_text()
+        annot2.set_visible(annot1.get_visible())
         update_annot(line, event.ind)
-        annot.set_visible(True)
+        annot1.set_visible(True)
+        annot2.set_text(save_annot_txt + f"\ndt={np.absolute(save_annot_xy[0] - annot1.xy[0]):.3f}")
+        annot2.xy = save_annot_xy
         fig.canvas.draw_idle()
 
 def func(label):
@@ -111,7 +167,7 @@ fig.canvas.mpl_connect("pick_event", on_pick)
 
 plt.show()
 
-# === Tracé accélérations ===
+# === Tracé vitesses ===
 fig, ax = plt.subplots(figsize=(10,5))
 lines = []
 lines.append(ax.plot(x, vit_x, 'o-', label="VitX", picker=5)[0])
@@ -121,7 +177,7 @@ lines.append(ax.plot(x, vit_z, 'o-', label="VitZ", picker=5)[0])
 
 plt.xlabel("Temps")
 plt.ylabel("vitesse (m/s)")
-plt.xticks(np.arange(0, max(x), 0.2))  # graduations tous les 0.2 s
+plt.xticks(np.arange(0, max(x), 0.200))  # graduations tous les 0.2 s
 plt.yticks(np.arange(int(min([min(df["AccX(g)"]), min(df["AccY(g)"]), min(df["AccZ(g)"])]))-1,
                      int(max([max(df["AccX(g)"]), max(df["AccY(g)"]), max(df["AccZ(g)"])]))+1, 1)) # graduations tous les 1 m/s
 plt.title("Vitesses calculées")
@@ -131,11 +187,17 @@ plt.grid(True)
 rax = plt.axes([0.85, 0.4, 0.1, 0.15])  # [left, bottom, width, height]
 check = CheckButtons(rax, [line.get_label() for line in lines], [True]*len(lines))
 
-annot = ax.annotate("", xy=(0, 0), xytext=(10, 10),
+annot1 = ax.annotate("", xy=(0, 0), xytext=(10, 10),
                     textcoords="offset points",
                     bbox=dict(boxstyle="round", fc="w"),
                     arrowprops=dict(arrowstyle="->"))
-annot.set_visible(False)
+annot1.set_visible(False)
+
+annot2 = ax.annotate("", xy=(0, 0), xytext=(10, 10),
+                    textcoords="offset points",
+                    bbox=dict(boxstyle="round", fc="w"),
+                    arrowprops=dict(arrowstyle="->"))
+annot2.set_visible(False)
 
 check.on_clicked(func)
 fig.canvas.mpl_connect("pick_event", on_pick)
